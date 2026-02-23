@@ -41,8 +41,7 @@ function buildManifest(encoded) {
           options: TIME_FILTERS.map(t => t.name),
           isRequired: false,
         },
-        { name: 'search', isRequired: false },
-        { name: 'skip',   isRequired: false },
+        { name: 'skip', isRequired: false },
       ],
     });
   });
