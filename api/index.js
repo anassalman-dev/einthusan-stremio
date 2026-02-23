@@ -382,7 +382,54 @@ module.exports = async (req, res) => {
       const streamUrl = await getStreamUrl(email, password, movieId, lang);
       res.statusCode = 200;
       if (streamUrl) {
-        res.end(JSON.stringify({ streams: [{ url: streamUrl, title: '▶ HD', name: 'Einthusan' }] }));
+        const streams = [];
+
+        // Stream principal — m3u8 ou mp4 avec headers nécessaires
+        streams.push({
+          url: streamUrl,
+          title: '▶ HD Stream',
+          name: 'Einthusan',
+          behaviorHints: {
+            notWebReady: true,
+            proxyHeaders: {
+              request: {
+                'Referer': 'https://einthusan.tv/',
+                'Origin': 'https://einthusan.tv',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+              },
+            },
+          },
+        });
+
+        // Si c'est un m3u8, proposer aussi le MP4 direct (souvent mieux supporté par Stremio)
+        if (streamUrl.includes('.m3u8')) {
+          const mp4Url = streamUrl.replace('.m3u8', '');
+          streams.push({
+            url: mp4Url,
+            title: '▶ HD Direct (MP4)',
+            name: 'Einthusan MP4',
+            behaviorHints: {
+              notWebReady: true,
+              proxyHeaders: {
+                request: {
+                  'Referer': 'https://einthusan.tv/',
+                  'Origin': 'https://einthusan.tv',
+                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                },
+              },
+            },
+          });
+        }
+
+        // Fallback navigateur
+        streams.push({
+          externalUrl: `https://einthusan.tv/premium/movie/watch/${movieId}/?lang=${lang}`,
+          title: '🌐 Ouvrir dans le navigateur',
+          name: 'Einthusan Web',
+        });
+
+        console.log(`[Stream] Retourne ${streams.length} stream(s) pour ${movieId}`);
+        res.end(JSON.stringify({ streams }));
       } else {
         res.end(JSON.stringify({
           streams: [{
