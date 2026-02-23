@@ -63,9 +63,11 @@ function buildManifest(encoded) {
 
 function decodeCredentials(encoded) {
   try {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    // Ajoute le padding base64 si nécessaire (supprimé dans l'URL)
+    const padded = encoded + '==='.slice((encoded.length + 3) % 4);
+    const decoded = Buffer.from(padded, 'base64').toString('utf8');
     const [email, ...passParts] = decoded.split(':');
-    const password = passParts.join(':'); // mot de passe peut contenir des :
+    const password = passParts.join(':');
     if (!email || !password) throw new Error('Invalid credentials');
     return { email, password };
   } catch (e) {

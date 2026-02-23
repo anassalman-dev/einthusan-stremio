@@ -1,6 +1,12 @@
 {
   "version": 2,
+  "functions": {
+    "api/[transport].js": {
+      "memory": 1024,
+      "maxDuration": 30
+    }
+  },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/[transport]" }
+    { "source": "/:path*", "destination": "/api/[transport]" }
   ]
 }

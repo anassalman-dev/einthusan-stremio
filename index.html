@@ -211,7 +211,7 @@
       }
       error.style.display = 'none';
 
-      const encoded = btoa(`${email}:${password}`);
+      const encoded = btoa(`${email}:${password}`).replace(/=/g, '');
       const base = window.location.origin;
       const manifestUrl = `${base}/${encoded}/manifest.json`;
       const installUrl = `stremio://${base.replace(/^https?:\/\//, '')}/${encoded}/manifest.json`;
