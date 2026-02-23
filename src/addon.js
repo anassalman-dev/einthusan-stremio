@@ -57,7 +57,7 @@ function buildManifest(encoded) {
     types: ['movie'],
     catalogs,
     idPrefixes: ['einthusan:'],
-    behaviorHints: { configurable: true, configurationRequired: true },
+    behaviorHints: { configurable: true },
   };
 }
 
