@@ -299,7 +299,7 @@ module.exports = async (req, res) => {
   // Stremio appelle cette URL → on fetch le vrai stream avec les cookies Einthusan
   if (addonPath === '/proxy' || addonPath.startsWith('/proxy/')) {
     try {
-      // Récupère l'URL du stream — Vercel peut la mettre dans req.query ou dans req.url
+      // Récupère l'URL du stream — Vercel la met dans req.query.url
       let urlParam = (req.query && req.query.url) ? req.query.url : null;
       
       if (!urlParam) {
@@ -311,23 +311,24 @@ module.exports = async (req, res) => {
       }
       
       if (!urlParam) {
+        console.log(`[Proxy] ❌ Pas de param url. query keys: ${Object.keys(req.query || {})}`);
         res.statusCode = 400;
         res.setHeader('Content-Type', 'text/plain');
         res.end('Missing url parameter');
         return;
       }
 
-      const streamUrl = urlParam; // déjà décodé par Vercel/Node
-      console.log(`[Proxy] Streaming: ${streamUrl.substring(0, 80)}…`);
+      const streamUrl = urlParam;
+      console.log(`[Proxy] 📡 URL: ${streamUrl.substring(0, 100)}`);
+      console.log(`[Proxy] 📡 Range header: ${req.headers.range || 'none'}`);
 
       // Login pour obtenir les cookies
       const cookies = await login(email, password);
       const cookieStr = cookiesToString(cookies);
+      console.log(`[Proxy] 🔐 Cookies: sid=${cookies.some(c => c.name === 'sid') ? 'yes' : 'no'}`);
 
-      // Déterminer si c'est un m3u8 (playlist) ou un segment/mp4
       const isM3u8 = streamUrl.includes('.m3u8');
 
-      // Faire le range request si présent
       const proxyHeaders = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         'Referer': 'https://einthusan.tv/',
@@ -339,60 +340,71 @@ module.exports = async (req, res) => {
         proxyHeaders['Range'] = req.headers.range;
       }
 
+      console.log(`[Proxy] ⏳ Fetching from CDN...`);
       const proxyRes = await axios.get(streamUrl, {
         headers: proxyHeaders,
-        responseType: 'stream',
-        timeout: 30000,
+        responseType: isM3u8 ? 'text' : 'stream',
+        timeout: 25000,
         maxRedirects: 5,
         validateStatus: s => s < 500,
       });
 
-      // Transmettre les headers de réponse importants
+      console.log(`[Proxy] ✅ CDN response: status=${proxyRes.status}, content-type=${proxyRes.headers['content-type'] || '?'}, content-length=${proxyRes.headers['content-length'] || '?'}`);
+
+      // Headers de réponse
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Range');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
+
       const contentType = proxyRes.headers['content-type'];
       if (contentType) res.setHeader('Content-Type', contentType);
-      
       const contentLength = proxyRes.headers['content-length'];
       if (contentLength) res.setHeader('Content-Length', contentLength);
-      
       const contentRange = proxyRes.headers['content-range'];
       if (contentRange) res.setHeader('Content-Range', contentRange);
-      
       const acceptRanges = proxyRes.headers['accept-ranges'];
       if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
 
-      res.setHeader('Access-Control-Allow-Origin', '*');
       res.statusCode = proxyRes.status;
 
-      // Si c'est un m3u8, on doit réécrire les URLs des segments pour passer par le proxy aussi
       if (isM3u8) {
-        const chunks = [];
-        for await (const chunk of proxyRes.data) {
-          chunks.push(chunk);
-        }
-        let m3u8Content = Buffer.concat(chunks).toString('utf-8');
+        // m3u8 est du texte — réécrire les URLs des segments
+        let m3u8Content = typeof proxyRes.data === 'string' ? proxyRes.data : String(proxyRes.data);
         
-        // Réécrire les URLs relatives/absolues des segments pour passer par le proxy
+        console.log(`[Proxy] 📄 m3u8 content (${m3u8Content.length} chars): ${m3u8Content.substring(0, 200)}`);
+
         const baseStreamUrl = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
         const proxyBase = `https://${req.headers.host}/${encoded}/proxy?url=`;
-        
-        m3u8Content = m3u8Content.replace(/^(?!#)(https?:\/\/[^\s]+)/gm, (match) => {
+
+        // Réécrire les URLs absolues
+        m3u8Content = m3u8Content.replace(/^(https?:\/\/[^\s]+)/gm, (match) => {
+          if (match.startsWith('#')) return match;
           return proxyBase + encodeURIComponent(match);
         });
-        m3u8Content = m3u8Content.replace(/^(?!#)(?!https?:\/\/)([^\s]+\.ts[^\s]*)/gm, (match) => {
-          const fullSegUrl = match.startsWith('/') ? new URL(match, streamUrl).href : baseStreamUrl + match;
+        // Réécrire les URLs relatives (.ts, .m3u8)
+        m3u8Content = m3u8Content.replace(/^(?!#|https?:\/\/)([^\s]+\.(ts|m3u8)[^\s]*)/gm, (match) => {
+          const fullSegUrl = match.startsWith('/') 
+            ? new URL(match, streamUrl).href 
+            : baseStreamUrl + match;
           return proxyBase + encodeURIComponent(fullSegUrl);
         });
 
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.end(m3u8Content);
+        console.log(`[Proxy] ✅ m3u8 envoyé (${m3u8Content.length} chars)`);
       } else {
-        // Stream binaire (segments .ts, mp4, etc.) — pipe directement
+        // Stream binaire — pipe directement
         proxyRes.data.pipe(res);
+        proxyRes.data.on('end', () => console.log(`[Proxy] ✅ Stream pipe terminé`));
+        proxyRes.data.on('error', (e) => console.error(`[Proxy] ❌ Pipe error: ${e.message}`));
       }
 
     } catch (err) {
-      console.error(`[Proxy] Erreur: ${err.message}`);
+      console.error(`[Proxy] ❌ Erreur: ${err.message}`);
+      if (err.code) console.error(`[Proxy] Code: ${err.code}`);
+      if (err.response) console.error(`[Proxy] Response status: ${err.response.status}`);
       res.statusCode = 502;
+      res.setHeader('Content-Type', 'text/plain');
       res.end(`Proxy error: ${err.message}`);
     }
     return;

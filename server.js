@@ -1,47 +1,32 @@
-// Serveur local pour tester avant de déployer sur Vercel
-const { buildAddon } = require('./src/addon');
-const { serveHTTP } = require('stremio-addon-sdk');
-const express = require('express');
-const path = require('path');
+const http = require('http');
+const url = require('url');
+const handler = require('./api/index');
 
-const app = express();
 const PORT = process.env.PORT || 7001;
 
-// Page de configuration
-app.get('/configure', (req, res) => {
-  res.sendFile(path.join(__dirname, 'configure/index.html'));
+const server = http.createServer((req, res) => {
+  // Simule le comportement de Vercel rewrites :
+  // Vercel fait /:path* → /api/index?path=:path*
+  // Ici on met le path dans req.query.path pour que api/index.js fonctionne pareil
+  const parsed = url.parse(req.url, true);
+  const pathname = parsed.pathname || '/';
+
+  // Fusionner les query params existants avec path
+  req.query = {
+    ...parsed.query,
+    path: pathname.replace(/^\//, ''),
+  };
+
+  handler(req, res);
 });
 
-app.get('/', (req, res) => {
-  res.redirect('/configure');
-});
-
-// Routes addon /{encoded}/...
-app.use('/:encoded', (req, res, next) => {
-  const { encoded } = req.params;
-
-  // Ignore les routes spéciales
-  if (encoded === 'configure' || encoded === 'favicon.ico') return next();
-
-  try {
-    const { decodeCredentials } = require('./src/addon');
-    decodeCredentials(encoded);
-  } catch (e) {
-    return res.status(400).json({ error: 'Identifiants invalides. Allez sur /configure' });
-  }
-
-  const addon = buildAddon(encoded);
-  req.url = req.url.replace(`/${encoded}`, '') || '/';
-  addon.middleware(req, res, next);
-});
-
-app.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔═══════════════════════════════════════════════════╗
-║        Einthusan Stremio Addon — v1.0.0           ║
+║     🇮🇳 Einthusan Stremio Addon — v1.1.0          ║
 ╠═══════════════════════════════════════════════════╣
-║  Page de config : http://localhost:${PORT}/configure  ║
-║  (Entrez vos identifiants pour générer votre URL) ║
+║  Configure : http://localhost:${PORT}/configure        ║
+║  Fonctionne sur : Render / Railway / Koyeb       ║
 ╚═══════════════════════════════════════════════════╝
   `);
 });
