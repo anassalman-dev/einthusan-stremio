@@ -239,79 +239,214 @@ async function getMovieMeta(email, password, movieId, lang) {
 
 // ─────────────────────────────────────────────────────────────
 // STREAM — récupère l'URL m3u8
+// Stratégie en cascade :
+//   1. AJAX POST /ajax/premium/movie/watch/{id}/ (avec CSRF)
+//   2. Cherche m3u8 dans le HTML/JS de la page premium
+//   3. Essaye les liens /raw/ (Chromecast)
+//   4. Cherche dans la page film normale
+//   5. Fallback → null (le caller retournera un lien externe)
 // ─────────────────────────────────────────────────────────────
+
+// Helper : extraire une URL m3u8/mp4 signée depuis n'importe quel texte
+function extractM3u8(text) {
+  if (!text) return null;
+  const str = typeof text === 'object' ? JSON.stringify(text) : String(text);
+
+  const patterns = [
+    /(https?:\/\/cdn\d*\.einthusan\.io\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)/i,
+    /(https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)/i,
+    /(https?:\/\/cdn\d*\.einthusan\.io\/[^\s"'<>\\]+\.mp4\?[^\s"'<>\\]*e=\d[^\s"'<>\\]*)/i,
+  ];
+
+  for (const pat of patterns) {
+    const m = str.match(pat);
+    if (m) {
+      return m[1].replace(/&amp;/g, '&').replace(/['">}\]]+$/, '');
+    }
+  }
+  return null;
+}
+
 async function getStreamUrl(email, password, movieId, lang) {
   const cookies = await login(email, password);
+  const cookieStr = cookiesToString(cookies);
 
-  // Charge la page premium
+  // ── Étape préliminaire : charger la page premium → rafraîchir CSRF ──
   const watchUrl = `${BASE_URL}/premium/movie/watch/${movieId}/?lang=${lang}`;
-  const html = await fetchPage(watchUrl, cookies);
-  const $ = cheerio.load(html);
+  console.log(`[Stream] Chargement page premium: ${watchUrl}`);
 
-  // Méthode 1 : cherche l'URL /raw/?l= dans les liens
-  let rawUrl = null;
-  $('a[href*="/raw/"]').each((i, el) => {
-    const href = $(el).attr('href');
-    if (href && href.includes('/raw/')) {
-      rawUrl = href.startsWith('http') ? href : `${BASE_URL}${href}`;
-      return false;
-    }
-  });
+  let premiumHtml = '';
+  let freshCookies = [...cookies]; // copie pour ne pas polluer le cache
 
-  // Méthode 2 : cherche dans les scripts
-  if (!rawUrl) {
-    $('script').each((i, el) => {
-      const content = $(el).html() || '';
-      const match = content.match(/['"](https?:\/\/[^'"]*\/raw\/\?l=[^'"]+)['"]/);
-      if (match) { rawUrl = match[1]; return false; }
-      // Cherche directement l'URL m3u8
-      const m3u8Match = content.match(/['"](https?:\/\/cdn\d*\.einthusan\.io\/[^'"]+\.m3u8[^'"]*)['"]/);
-      if (m3u8Match) { rawUrl = m3u8Match[1]; return false; }
+  try {
+    const pageRes = await axios.get(watchUrl, {
+      headers: {
+        ...DEFAULT_HEADERS,
+        'Cookie': cookieStr,
+        'Referer': `${BASE_URL}/movie/watch/${movieId}/?lang=${lang}`,
+      },
+      maxRedirects: 5,
+      validateStatus: s => s < 500,
     });
-  }
 
-  // Méthode 3 : cherche l'URL m3u8 directement dans le HTML (avec &amp;)
-  if (!rawUrl) {
-    // Pattern avec &amp; (HTML encodé)
-    const m3u8Amp = html.match(/https?:\/\/cdn\d*\.einthusan\.io\/[^"'<\s]+\.m3u8[^"'<\s]*/);
-    if (m3u8Amp) {
-      rawUrl = m3u8Amp[0].replace(/&amp;/g, "&");
+    premiumHtml = pageRes.data || '';
+    console.log(`[Stream] Page premium: status=${pageRes.status}, length=${premiumHtml.length}`);
+
+    // Met à jour les cookies (le _gorilla_csrf peut être rafraîchi à chaque page)
+    const newCookies = parseCookies(pageRes.headers['set-cookie']);
+    for (const nc of newCookies) {
+      const idx = freshCookies.findIndex(c => c.name === nc.name);
+      if (idx >= 0) freshCookies[idx] = nc;
+      else freshCookies.push(nc);
     }
-  }
-  
-  // Méthode 4 : cherche dans le HTML brut pour /raw/
-  if (!rawUrl) {
-    const rawMatch = html.match(/https?:\/\/[^"'\s]*\/raw\/\?l=[^"'\s]+/);
-    if (rawMatch) rawUrl = rawMatch[0];
+  } catch (err) {
+    console.error(`[Stream] Erreur page premium: ${err.message}`);
   }
 
-  if (!rawUrl) {
-    // Log pour debug — affiche un extrait du HTML reçu
-    const cdnIdx = html.indexOf('einthusan.io');
-    console.warn(`[Einthusan] ⚠️ Pas d'URL stream pour ${movieId} — HTML length: ${html.length}, cdn found at: ${cdnIdx}`);
-    if (cdnIdx > 0) console.warn('[Einthusan] Extrait HTML:', html.substring(cdnIdx - 20, cdnIdx + 200));
-    return null;
-  }
+  const freshCookieStr = cookiesToString(freshCookies);
 
-  // Si c'est une URL /raw/, on suit la redirection pour obtenir le vrai m3u8
-  if (rawUrl.includes('/raw/')) {
+  // ── Méthode 1 : AJAX POST avec CSRF token ──────────────────────────
+  const csrfCookie = freshCookies.find(c => c.name === '_gorilla_csrf');
+
+  if (csrfCookie) {
+    // Collecte les tokens CSRF candidats (cookie brut, décodé, HTML)
+    const csrfCandidates = [csrfCookie.value];
+
     try {
-      const redirectRes = await axios.get(rawUrl, {
-        headers: { ...DEFAULT_HEADERS, 'Cookie': cookiesToString(cookies) },
-        maxRedirects: 0,
-        validateStatus: s => s < 400,
-      });
-      // La vraie URL est dans le paramètre ?l=
-      const lParam = new URL(rawUrl).searchParams.get('l');
-      if (lParam) return decodeURIComponent(lParam);
-    } catch (e) {
-      // Extrait le paramètre l= directement
-      const lParam = rawUrl.split('?l=')[1];
-      if (lParam) return decodeURIComponent(lParam);
+      const decoded = decodeURIComponent(csrfCookie.value);
+      if (decoded !== csrfCookie.value) csrfCandidates.push(decoded);
+    } catch (e) { /* ignore */ }
+
+    if (premiumHtml) {
+      const $p = cheerio.load(premiumHtml);
+      const metaCsrf = $p('meta[name="csrf-token"]').attr('content')
+        || $p('input[name="csrfmiddlewaretoken"]').val();
+      if (metaCsrf) csrfCandidates.push(metaCsrf);
+
+      const jsMatch = premiumHtml.match(/csrf[_-]?token['":\s]+['"]([^'"]+)/i);
+      if (jsMatch) csrfCandidates.push(jsMatch[1]);
+    }
+
+    const uniqueTokens = [...new Set(csrfCandidates)];
+    console.log(`[Stream] CSRF candidats: ${uniqueTokens.length} token(s)`);
+
+    for (const token of uniqueTokens) {
+      try {
+        console.log(`[Stream] → AJAX POST avec CSRF: ${token.substring(0, 30)}...`);
+
+        const ajaxRes = await axios.post(
+          `${BASE_URL}/ajax/premium/movie/watch/${movieId}/?lang=${lang}`,
+          '', // body vide
+          {
+            headers: {
+              ...DEFAULT_HEADERS,
+              'X-Requested-With': 'XMLHttpRequest',
+              'X-CSRFToken': token,
+              'Cookie': freshCookieStr,
+              'Referer': watchUrl,
+              'Origin': BASE_URL,
+              'Accept': 'application/json, text/javascript, */*; q=0.01',
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            },
+            maxRedirects: 0,
+            validateStatus: s => s < 500,
+            timeout: 15000,
+          }
+        );
+
+        console.log(`[Stream] AJAX réponse: status=${ajaxRes.status}, length=${String(ajaxRes.data).length}`);
+
+        if (ajaxRes.status === 403) {
+          console.log(`[Stream] 403 avec ce token, essai suivant…`);
+          continue;
+        }
+
+        const url = extractM3u8(ajaxRes.data);
+        if (url) {
+          console.log(`[Stream] ✅ m3u8 via AJAX: ${url.substring(0, 80)}…`);
+          return url;
+        }
+
+        // Debug : afficher un extrait de la réponse
+        const snippet = typeof ajaxRes.data === 'string'
+          ? ajaxRes.data.substring(0, 300)
+          : JSON.stringify(ajaxRes.data).substring(0, 300);
+        console.log(`[Stream] AJAX réponse (extrait): ${snippet}`);
+
+      } catch (err) {
+        console.error(`[Stream] AJAX erreur: ${err.message}`);
+      }
+    }
+  } else {
+    console.warn(`[Stream] ⚠️ Pas de cookie _gorilla_csrf`);
+  }
+
+  // ── Méthode 2 : m3u8 dans le HTML de la page premium ──────────────
+  if (premiumHtml) {
+    const urlFromHtml = extractM3u8(premiumHtml);
+    if (urlFromHtml) {
+      console.log(`[Stream] ✅ m3u8 dans HTML premium: ${urlFromHtml.substring(0, 80)}…`);
+      return urlFromHtml;
     }
   }
 
-  return rawUrl;
+  // ── Méthode 3 : liens /raw/ (Chromecast) ──────────────────────────
+  if (premiumHtml) {
+    const $ = cheerio.load(premiumHtml);
+
+    let rawUrl = null;
+
+    // 3a : liens <a> vers /raw/
+    $('a[href*="/raw/"]').each((i, el) => {
+      const href = $(el).attr('href');
+      if (href) { rawUrl = href.startsWith('http') ? href : `${BASE_URL}${href}`; return false; }
+    });
+
+    // 3b : /raw/ dans les scripts inline
+    if (!rawUrl) {
+      const rawMatch = premiumHtml.match(/['"]([^'"]*\/raw\/\?l=[^'"]+)['"]/);
+      if (rawMatch) rawUrl = rawMatch[1].startsWith('http') ? rawMatch[1] : `${BASE_URL}${rawMatch[1]}`;
+    }
+
+    // 3c : /raw/ n'importe où dans le HTML
+    if (!rawUrl) {
+      const rawBrut = premiumHtml.match(/https?:\/\/[^\s"']*\/raw\/\?l=[^\s"']+/);
+      if (rawBrut) rawUrl = rawBrut[0];
+    }
+
+    if (rawUrl) {
+      console.log(`[Stream] Trouvé /raw/ URL: ${rawUrl.substring(0, 80)}…`);
+      try {
+        const lParam = new URL(rawUrl).searchParams.get('l');
+        if (lParam) {
+          const decoded = decodeURIComponent(lParam);
+          console.log(`[Stream] ✅ m3u8 via /raw/: ${decoded.substring(0, 80)}…`);
+          return decoded;
+        }
+      } catch (e) {
+        const lSplit = rawUrl.split('?l=')[1];
+        if (lSplit) return decodeURIComponent(lSplit);
+      }
+    }
+  }
+
+  // ── Méthode 4 : page film normale (/movie/watch/) ─────────────────
+  try {
+    const normalUrl = `${BASE_URL}/movie/watch/${movieId}/?lang=${lang}`;
+    const normalHtml = await fetchPage(normalUrl, freshCookies);
+    const urlFromNormal = extractM3u8(normalHtml);
+    if (urlFromNormal) {
+      console.log(`[Stream] ✅ m3u8 via page normale: ${urlFromNormal.substring(0, 80)}…`);
+      return urlFromNormal;
+    }
+  } catch (err) {
+    console.error(`[Stream] Erreur page normale: ${err.message}`);
+  }
+
+  // ── Échec total ────────────────────────────────────────────────────
+  const cdnIdx = premiumHtml.indexOf('einthusan.io');
+  console.warn(`[Stream] ⚠️ Toutes les méthodes ont échoué pour ${movieId} — cdn dans HTML: ${cdnIdx >= 0 ? 'oui' : 'non'}`);
+  return null;
 }
 
 module.exports = { login, browseLatest, browsePopular, search, getMovieMeta, getStreamUrl };
