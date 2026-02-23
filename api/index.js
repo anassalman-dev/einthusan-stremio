@@ -14,7 +14,13 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const url = req.query && req.query.path ? "/" + req.query.path : (req.url || "/");
+  // Vercel passe le path dans req.query.path ou req.url
+  let url;
+  if (req.query && req.query.path) {
+    url = "/" + req.query.path;
+  } else {
+    url = (req.url || "/").split("?")[0];
+  }
   const parts = url.split('/').filter(Boolean);
   console.log(`[Request] ${req.method} ${url}`);
 
