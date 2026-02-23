@@ -181,7 +181,8 @@ function parseMovieList(html, defaultLang) {
 // ─────────────────────────────────────────────────────────────
 async function browseLatest(email, password, lang) {
   const cookies = await login(email, password);
-  const url = `${BASE_URL}/movie/browse/?lang=${lang}`;
+  // /movie/browse/ charge en JS, on utilise /results/ à la place
+  const url = `${BASE_URL}/movie/results/?find=Popularity&lang=${lang}&ptype=view&tp=td`;
   const html = await fetchPage(url, cookies);
   return parseMovieList(html, lang);
 }
