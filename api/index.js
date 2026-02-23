@@ -1,5 +1,6 @@
 const { buildManifest, decodeCredentials } = require('../src/addon');
-const { browseLatest, browsePopular, search, getMovieMeta, getStreamUrl } = require('../src/einthusan');
+const { login, cookiesToString, browseLatest, browsePopular, search, getMovieMeta, getStreamUrl } = require('../src/einthusan');
+const axios = require('axios');
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -292,6 +293,111 @@ module.exports = async (req, res) => {
 
   const { email, password } = credentials;
   const addonPath = '/' + parts.slice(1).join('/');
+
+  // ── PROXY STREAM ─────────────────────────────────────────
+  // Route: /{encoded}/proxy?url=ENCODED_STREAM_URL
+  // Stremio appelle cette URL → on fetch le vrai stream avec les cookies Einthusan
+  if (addonPath === '/proxy' || addonPath.startsWith('/proxy/')) {
+    try {
+      // Récupère l'URL du stream — Vercel peut la mettre dans req.query ou dans req.url
+      let urlParam = (req.query && req.query.url) ? req.query.url : null;
+      
+      if (!urlParam) {
+        // Fallback: extraire depuis req.url
+        const fullUrl = req.url || '';
+        try {
+          urlParam = new URL(`http://localhost${fullUrl}`).searchParams.get('url');
+        } catch (e) { /* ignore */ }
+      }
+      
+      if (!urlParam) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain');
+        res.end('Missing url parameter');
+        return;
+      }
+
+      const streamUrl = urlParam; // déjà décodé par Vercel/Node
+      console.log(`[Proxy] Streaming: ${streamUrl.substring(0, 80)}…`);
+
+      // Login pour obtenir les cookies
+      const cookies = await login(email, password);
+      const cookieStr = cookiesToString(cookies);
+
+      // Déterminer si c'est un m3u8 (playlist) ou un segment/mp4
+      const isM3u8 = streamUrl.includes('.m3u8');
+
+      // Faire le range request si présent
+      const proxyHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Referer': 'https://einthusan.tv/',
+        'Origin': 'https://einthusan.tv',
+        'Cookie': cookieStr,
+      };
+
+      if (req.headers.range) {
+        proxyHeaders['Range'] = req.headers.range;
+      }
+
+      const proxyRes = await axios.get(streamUrl, {
+        headers: proxyHeaders,
+        responseType: 'stream',
+        timeout: 30000,
+        maxRedirects: 5,
+        validateStatus: s => s < 500,
+      });
+
+      // Transmettre les headers de réponse importants
+      const contentType = proxyRes.headers['content-type'];
+      if (contentType) res.setHeader('Content-Type', contentType);
+      
+      const contentLength = proxyRes.headers['content-length'];
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+      
+      const contentRange = proxyRes.headers['content-range'];
+      if (contentRange) res.setHeader('Content-Range', contentRange);
+      
+      const acceptRanges = proxyRes.headers['accept-ranges'];
+      if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
+
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.statusCode = proxyRes.status;
+
+      // Si c'est un m3u8, on doit réécrire les URLs des segments pour passer par le proxy aussi
+      if (isM3u8) {
+        const chunks = [];
+        for await (const chunk of proxyRes.data) {
+          chunks.push(chunk);
+        }
+        let m3u8Content = Buffer.concat(chunks).toString('utf-8');
+        
+        // Réécrire les URLs relatives/absolues des segments pour passer par le proxy
+        const baseStreamUrl = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
+        const proxyBase = `https://${req.headers.host}/${encoded}/proxy?url=`;
+        
+        m3u8Content = m3u8Content.replace(/^(?!#)(https?:\/\/[^\s]+)/gm, (match) => {
+          return proxyBase + encodeURIComponent(match);
+        });
+        m3u8Content = m3u8Content.replace(/^(?!#)(?!https?:\/\/)([^\s]+\.ts[^\s]*)/gm, (match) => {
+          const fullSegUrl = match.startsWith('/') ? new URL(match, streamUrl).href : baseStreamUrl + match;
+          return proxyBase + encodeURIComponent(fullSegUrl);
+        });
+
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.end(m3u8Content);
+      } else {
+        // Stream binaire (segments .ts, mp4, etc.) — pipe directement
+        proxyRes.data.pipe(res);
+      }
+
+    } catch (err) {
+      console.error(`[Proxy] Erreur: ${err.message}`);
+      res.statusCode = 502;
+      res.end(`Proxy error: ${err.message}`);
+    }
+    return;
+  }
+
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
   try {
@@ -382,41 +488,34 @@ module.exports = async (req, res) => {
       const streamUrl = await getStreamUrl(email, password, movieId, lang);
       res.statusCode = 200;
       if (streamUrl) {
+        // Construire l'URL proxy pour que Stremio passe par notre serveur
+        const host = req.headers.host || 'einthusan-stremio.vercel.app';
+        const proxyUrl = `https://${host}/${encoded}/proxy?url=${encodeURIComponent(streamUrl)}`;
+
         const streams = [];
 
-        // Stream principal — m3u8 ou mp4 avec headers nécessaires
+        // Stream via proxy (m3u8 avec cookies authentifiés)
         streams.push({
-          url: streamUrl,
-          title: '▶ HD Stream',
+          url: proxyUrl,
+          title: '▶ HD',
           name: 'Einthusan',
           behaviorHints: {
-            notWebReady: true,
-            proxyHeaders: {
-              request: {
-                'Referer': 'https://einthusan.tv/',
-                'Origin': 'https://einthusan.tv',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-              },
-            },
+            notWebReady: false,
+            bingeGroup: `einthusan-${lang}`,
           },
         });
 
-        // Si c'est un m3u8, proposer aussi le MP4 direct (souvent mieux supporté par Stremio)
+        // Aussi le MP4 via proxy
         if (streamUrl.includes('.m3u8')) {
           const mp4Url = streamUrl.replace('.m3u8', '');
+          const mp4ProxyUrl = `https://${host}/${encoded}/proxy?url=${encodeURIComponent(mp4Url)}`;
           streams.push({
-            url: mp4Url,
-            title: '▶ HD Direct (MP4)',
+            url: mp4ProxyUrl,
+            title: '▶ HD (MP4)',
             name: 'Einthusan MP4',
             behaviorHints: {
-              notWebReady: true,
-              proxyHeaders: {
-                request: {
-                  'Referer': 'https://einthusan.tv/',
-                  'Origin': 'https://einthusan.tv',
-                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                },
-              },
+              notWebReady: false,
+              bingeGroup: `einthusan-${lang}`,
             },
           });
         }
@@ -424,7 +523,7 @@ module.exports = async (req, res) => {
         // Fallback navigateur
         streams.push({
           externalUrl: `https://einthusan.tv/premium/movie/watch/${movieId}/?lang=${lang}`,
-          title: '🌐 Ouvrir dans le navigateur',
+          title: '🌐 Navigateur',
           name: 'Einthusan Web',
         });
 

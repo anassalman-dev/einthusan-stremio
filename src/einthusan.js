@@ -463,4 +463,4 @@ async function getStreamUrl(email, password, movieId, lang) {
   return null;
 }
 
-module.exports = { login, browseLatest, browsePopular, search, getMovieMeta, getStreamUrl };
+module.exports = { login, cookiesToString, browseLatest, browsePopular, search, getMovieMeta, getStreamUrl };
