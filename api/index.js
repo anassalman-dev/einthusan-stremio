@@ -19,6 +19,8 @@ module.exports = async (req, res) => {
   } else {
     url = (req.url || "/").split("?")[0];
   }
+  // Décoder les caractères URL-encodés (%3A → :, %2F → /, etc.)
+  try { url = decodeURIComponent(url); } catch (e) { /* ignore */ }
   const parts = url.split('/').filter(Boolean);
   console.log(`[Request] ${req.method} ${url}`);
 
@@ -337,6 +339,7 @@ module.exports = async (req, res) => {
     const metaMatch = addonPath.match(/^\/meta\/movie\/([^/]+)\.json$/);
     if (metaMatch) {
       const id = metaMatch[1];
+      console.log(`[Meta] Requête pour ID: ${id}`);
       if (!id.startsWith('einthusan:')) {
         res.statusCode = 200;
         res.end(JSON.stringify({ meta: null }));
@@ -344,18 +347,24 @@ module.exports = async (req, res) => {
       }
       const [, movieId, lang] = id.split(':');
       const data = await getMovieMeta(email, password, movieId, lang);
+      const meta = {
+        id,
+        type: 'movie',
+        name: data.title,
+        poster: data.poster,
+        background: data.poster,
+        description: data.description,
+      };
+      if (data.year) {
+        meta.year = data.year;
+        meta.releaseInfo = String(data.year);
+      }
+      if (data.cast && data.cast.length > 0) {
+        meta.cast = data.cast;
+      }
+      console.log(`[Meta] Réponse: ${data.title} (${data.year || '?'})`);
       res.statusCode = 200;
-      res.end(JSON.stringify({
-        meta: {
-          id, type: 'movie',
-          name: data.title,
-          poster: data.poster,
-          background: data.poster,
-          description: data.description,
-          ...(data.year && { year: data.year }),
-          ...(data.cast && data.cast.length > 0 && { cast: data.cast }),
-        }
-      }));
+      res.end(JSON.stringify({ meta }));
       return;
     }
 
@@ -363,6 +372,7 @@ module.exports = async (req, res) => {
     const streamMatch = addonPath.match(/^\/stream\/movie\/([^/]+)\.json$/);
     if (streamMatch) {
       const id = streamMatch[1];
+      console.log(`[Stream] Requête pour ID: ${id}`);
       if (!id.startsWith('einthusan:')) {
         res.statusCode = 200;
         res.end(JSON.stringify({ streams: [] }));
@@ -385,6 +395,7 @@ module.exports = async (req, res) => {
       return;
     }
 
+    console.log(`[404] Route non trouvée: ${addonPath}`);
     res.statusCode = 404;
     res.end(JSON.stringify({ error: 'Route non trouvée', path: addonPath }));
 
