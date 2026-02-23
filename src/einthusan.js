@@ -220,12 +220,26 @@ async function getMovieMeta(email, password, movieId, lang) {
   const title       = $('h3[itemprop="name"]').text().trim() ||
                       $('div.block2 a.title h3').text().trim() ||
                       $('h1').first().text().trim() || movieId;
-  const poster      = $('meta[property="og:image"]').attr('content') || '';
+
+  let poster = $('meta[property="og:image"]').attr('content') || '';
+  if (poster.startsWith('//')) poster = 'https:' + poster;
+
   const description = $('meta[property="og:description"]').attr('content') ||
                       $('p.synopsis').first().text().trim() || '';
-  const yearText    = $('div.info p').first().text();
-  const yearMatch   = yearText.match(/\b(19|20)\d{2}\b/);
-  const year        = yearMatch ? parseInt(yearMatch[0]) : null;
+
+  // Année — essaye plusieurs emplacements
+  let year = null;
+  const yearCandidates = [
+    $('div.info p').first().text(),
+    $('div.block2 div.info').text(),
+    $('p.info').first().text(),
+    $('[itemprop="dateCreated"]').text(),
+    html.match(/<p>\s*((?:19|20)\d{2})\s*<span/)?.[1] || '',
+  ];
+  for (const txt of yearCandidates) {
+    const m = txt.match(/\b(19|20)\d{2}\b/);
+    if (m) { year = parseInt(m[0]); break; }
+  }
 
   // Acteurs
   const cast = [];
