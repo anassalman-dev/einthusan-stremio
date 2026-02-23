@@ -31,7 +31,8 @@ module.exports = async (req, res) => {
     return;
   }
 
-  if (parts[0] === 'configure') {
+  // /configure OU /{encoded}/configure
+  if (parts[0] === 'configure' || parts[1] === 'configure') {
     const htmlPath = path.join(__dirname, '../configure/index.html');
     const html = fs.readFileSync(htmlPath, 'utf8');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
