@@ -270,14 +270,26 @@ async function getStreamUrl(email, password, movieId, lang) {
     });
   }
 
-  // Méthode 3 : cherche dans le HTML brut
+  // Méthode 3 : cherche l'URL m3u8 directement dans le HTML (avec &amp;)
+  if (!rawUrl) {
+    // Pattern avec &amp; (HTML encodé)
+    const m3u8Amp = html.match(/https?:\/\/cdn\d*\.einthusan\.io\/[^"'<\s]+\.m3u8[^"'<\s]*/);
+    if (m3u8Amp) {
+      rawUrl = m3u8Amp[0].replace(/&amp;/g, "&");
+    }
+  }
+  
+  // Méthode 4 : cherche dans le HTML brut pour /raw/
   if (!rawUrl) {
     const rawMatch = html.match(/https?:\/\/[^"'\s]*\/raw\/\?l=[^"'\s]+/);
     if (rawMatch) rawUrl = rawMatch[0];
   }
 
   if (!rawUrl) {
-    console.warn(`[Einthusan] ⚠️ Pas d'URL stream pour ${movieId}`);
+    // Log pour debug — affiche un extrait du HTML reçu
+    const cdnIdx = html.indexOf('einthusan.io');
+    console.warn(`[Einthusan] ⚠️ Pas d'URL stream pour ${movieId} — HTML length: ${html.length}, cdn found at: ${cdnIdx}`);
+    if (cdnIdx > 0) console.warn('[Einthusan] Extrait HTML:', html.substring(cdnIdx - 20, cdnIdx + 200));
     return null;
   }
 
