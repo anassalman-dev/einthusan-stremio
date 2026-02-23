@@ -14,7 +14,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const url = req.url || '/';
+  const url = req.query && req.query.path ? "/" + req.query.path : (req.url || "/");
   const parts = url.split('/').filter(Boolean);
   console.log(`[Request] ${req.method} ${url}`);
 
