@@ -500,37 +500,25 @@ module.exports = async (req, res) => {
       const streamUrl = await getStreamUrl(email, password, movieId, lang);
       res.statusCode = 200;
       if (streamUrl) {
-        // Construire l'URL proxy pour que Stremio passe par notre serveur
-        const host = req.headers.host || 'einthusan-stremio.vercel.app';
-        const proxyUrl = `https://${host}/${encoded}/proxy?url=${encodeURIComponent(streamUrl)}`;
-
+        console.log(`[Stream] URL finale: ${streamUrl}`);
         const streams = [];
 
-        // Stream via proxy (m3u8 avec cookies authentifiés)
+        // Stream direct — l'URL CDN est accessible directement par Stremio
         streams.push({
-          url: proxyUrl,
+          url: streamUrl,
           title: '▶ HD',
           name: 'Einthusan',
           behaviorHints: {
-            notWebReady: false,
+            notWebReady: true,
             bingeGroup: `einthusan-${lang}`,
+            proxyHeaders: {
+              request: {
+                'Referer': 'https://einthusan.tv/',
+                'Origin': 'https://einthusan.tv',
+              },
+            },
           },
         });
-
-        // Aussi le MP4 via proxy
-        if (streamUrl.includes('.m3u8')) {
-          const mp4Url = streamUrl.replace('.m3u8', '');
-          const mp4ProxyUrl = `https://${host}/${encoded}/proxy?url=${encodeURIComponent(mp4Url)}`;
-          streams.push({
-            url: mp4ProxyUrl,
-            title: '▶ HD (MP4)',
-            name: 'Einthusan MP4',
-            behaviorHints: {
-              notWebReady: false,
-              bingeGroup: `einthusan-${lang}`,
-            },
-          });
-        }
 
         // Fallback navigateur
         streams.push({

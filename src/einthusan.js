@@ -275,10 +275,27 @@ function extractM3u8(text) {
   for (const pat of patterns) {
     const m = str.match(pat);
     if (m) {
-      return m[1].replace(/&amp;/g, '&').replace(/['">}\]]+$/, '');
+      let url = m[1].replace(/&amp;/g, '&').replace(/['">}\]]+$/, '');
+      return fixStreamUrl(url);
     }
   }
   return null;
+}
+
+// Helper : convertir IP directe → cdn1.einthusan.io + ajouter &p=priority
+function fixStreamUrl(url) {
+  if (!url) return url;
+  // Remplacer les IPs directes par cdn1.einthusan.io
+  url = url.replace(/https?:\/\/\d+\.\d+\.\d+\.\d+\//, 'https://cdn1.einthusan.io/');
+  // S'assurer que le domaine est bien en https
+  if (url.startsWith('http://cdn')) {
+    url = url.replace('http://', 'https://');
+  }
+  // Ajouter &p=priority si absent
+  if (!url.includes('p=priority')) {
+    url += (url.includes('?') ? '&' : '?') + 'p=priority';
+  }
+  return url;
 }
 
 async function getStreamUrl(email, password, movieId, lang) {
